@@ -1,5 +1,4 @@
 import axios, { AxiosInstance } from 'axios';
-import * as crypto from 'crypto';
 
 interface Ticker {
   pair: string;
@@ -23,14 +22,14 @@ interface CoinData {
   volume24h: number;
   change24h: number;
   changePercent24h: number;
-  buyScore: number; // 0-100, higher is better to buy
+  buyScore: number;
 }
 
 export class LunoAPI {
   private apiClient: AxiosInstance;
   private apiKeyId: string;
   private apiKeySecret: string;
-  private baseUrl = 'https://api.luno.com/1';
+  private baseUrl = 'https://api.mybitx.com/api';
 
   constructor(apiKeyId: string, apiKeySecret: string) {
     this.apiKeyId = apiKeyId;
@@ -51,7 +50,7 @@ export class LunoAPI {
   async getTickers(): Promise<CoinData[]> {
     try {
       const response = await this.apiClient.get<{ tickers: Ticker[] }>(
-        '/tickers'
+        '/1/tickers'
       );
       
       const coinDataList: CoinData[] = response.data.tickers
@@ -60,6 +59,7 @@ export class LunoAPI {
 
       return coinDataList;
     } catch (error) {
+      console.error('API Error:', error);
       throw new Error(`Failed to fetch tickers: ${error}`);
     }
   }
@@ -80,9 +80,10 @@ export class LunoAPI {
 
     // Buy Score: 0-100
     // Higher score = better to buy (price closer to 24h low)
-    const priceRangePercent =
-      ((currentPrice - low24h) / (high24h - low24h)) * 100;
-    const buyScore = Math.max(0, 100 - priceRangePercent);
+    const priceRange = high24h - low24h;
+    const priceFromLow = currentPrice - low24h;
+    const priceRangePercent = priceRange > 0 ? (priceFromLow / priceRange) * 100 : 0;
+    const buyScore = Math.max(0, Math.min(100, 100 - priceRangePercent));
 
     return {
       pair: ticker.pair,
@@ -103,7 +104,7 @@ export class LunoAPI {
    */
   async getAccountInfo() {
     try {
-      const response = await this.apiClient.get('/accounts');
+      const response = await this.apiClient.get('/1/accounts');
       return response.data;
     } catch (error) {
       throw new Error(`Failed to fetch account info: ${error}`);
