@@ -55,14 +55,14 @@ export class MarketDataProvider
     }
 
     if (element) {
-      return Promise.resolve([]);
+      return Promise.resolve(element.coinData ? this.getDetails(element.coinData) : []);
     }
 
     return Promise.resolve(
       this.coins.map(
         (coin) =>
           new CoinTreeItem(
-            `${coin.pair}: R${coin.currentPrice.toFixed(2)}`,
+            `${coin.pair}  ${formatPrice(coin.currentPrice)}`,
             vscode.TreeItemCollapsibleState.Collapsed,
             {
               title: 'View Details',
@@ -78,6 +78,15 @@ export class MarketDataProvider
       )
     );
   }
+
+  private getDetails(coin: CoinData): CoinTreeItem[] {
+    return [
+      new CoinTreeItem(`24h: ${formatPercent(coin.changePercent24h)}`, vscode.TreeItemCollapsibleState.None, undefined, undefined, 'pulse'),
+      new CoinTreeItem(`Range: ${formatPrice(coin.low24h)} - ${formatPrice(coin.high24h)}`, vscode.TreeItemCollapsibleState.None, undefined, undefined, 'graph-line'),
+      new CoinTreeItem(`Volume: ${formatCompactNumber(coin.volume24h)}`, vscode.TreeItemCollapsibleState.None, undefined, undefined, 'bar-chart'),
+      new CoinTreeItem(`Buy score: ${coin.buyScore.toFixed(0)}/100`, vscode.TreeItemCollapsibleState.None, undefined, undefined, 'star-full'),
+    ];
+  }
 }
 
 class CoinTreeItem extends vscode.TreeItem {
@@ -85,29 +94,46 @@ class CoinTreeItem extends vscode.TreeItem {
     public readonly label: string,
     public readonly collapsibleState: vscode.TreeItemCollapsibleState,
     public readonly command?: vscode.Command,
-    public readonly coinData?: CoinData
+    public readonly coinData?: CoinData,
+    iconName = 'symbol-variable'
   ) {
     super(label, collapsibleState);
 
     if (coinData) {
-      const changeEmoji = coinData.changePercent24h >= 0 ? '📈' : '📉';
-      this.description = `${changeEmoji} ${coinData.changePercent24h.toFixed(2)}%`;
+      this.description = `${formatPercent(coinData.changePercent24h)}  |  score ${coinData.buyScore.toFixed(0)}`;
       this.tooltip = this.generateTooltip(coinData);
     }
 
-    this.iconPath = new vscode.ThemeIcon('symbol-variable');
+    this.iconPath = new vscode.ThemeIcon(iconName);
   }
 
   private generateTooltip(coin: CoinData): string {
     return `
 Pair: ${coin.pair}
-Current Price: R${coin.currentPrice.toFixed(2)}
-Bid: R${coin.bid.toFixed(2)} | Ask: R${coin.ask.toFixed(2)}
-24h High: R${coin.high24h.toFixed(2)}
-24h Low: R${coin.low24h.toFixed(2)}
-24h Change: R${coin.change24h.toFixed(2)} (${coin.changePercent24h.toFixed(2)}%)
-24h Volume: R${coin.volume24h.toLocaleString()}
+Current Price: RM${coin.currentPrice.toFixed(2)}
+Bid: RM${coin.bid.toFixed(2)} | Ask: RM${coin.ask.toFixed(2)}
+24h High: RM${coin.high24h.toFixed(2)}
+24h Low: RM${coin.low24h.toFixed(2)}
+24h Change: RM${coin.change24h.toFixed(2)} (${coin.changePercent24h.toFixed(2)}%)
+24h Volume: RM${coin.volume24h.toLocaleString()}
 Buy Score: ${coin.buyScore.toFixed(0)}/100
     `;
   }
+}
+
+function formatPrice(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return 'N/A';
+  if (value < 0.0001) return `RM${value.toFixed(8)}`;
+  if (value < 1) return `RM${value.toFixed(4)}`;
+  return `RM${value.toFixed(2)}`;
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) return 'N/A';
+  return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+}
+
+function formatCompactNumber(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return 'N/A';
+  return new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 2 }).format(value);
 }
