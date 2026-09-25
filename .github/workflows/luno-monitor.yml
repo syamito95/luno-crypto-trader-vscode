@@ -42,7 +42,7 @@ jobs:
         run: |
           git config user.name "luno-monitor-bot"
           git config user.email "actions@github.com"
-          git add data/price-history.json
+          git add data/price-history.json data/paper-trades.json
           git diff --quiet --cached || git commit -m "chore: update price history [skip ci]"
           for i in 1 2 3 4 5; do
             git pull --rebase --autostash origin main && git push && break

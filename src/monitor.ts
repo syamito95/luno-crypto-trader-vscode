@@ -19,7 +19,38 @@ interface PricePoint {
 
 type HistoryStore = Record<string, PricePoint[]>;
 
+interface PaperPosition {
+  id: string;
+  pair: string;
+  entryPrice: number;
+  quantity: number;
+  stopLossPrice: number;
+  takeProfitPrice: number;
+  openedAt: number;
+}
+
+interface ClosedPaperPosition extends PaperPosition {
+  closePrice: number;
+  closedAt: number;
+  closeReason: 'TAKE_PROFIT' | 'STOP_LOSS';
+  pnlMyr: number;
+  pnlPercent: number;
+}
+
+interface SellSignalEvent {
+  timestamp: number;
+  price: number;
+  changeLastHourPercent: number;
+}
+
+interface PaperState {
+  openPositions: PaperPosition[];
+  closedPositions: ClosedPaperPosition[];
+  sellSignalLog: SellSignalEvent[];
+}
+
 const HISTORY_PATH = path.join(__dirname, '..', 'data', 'price-history.json');
+const PAPER_STATE_PATH = path.join(__dirname, '..', 'data', 'paper-trades.json');
 
 function loadHistory(): HistoryStore {
   try {
@@ -36,6 +67,23 @@ function saveHistory(history: HistoryStore) {
   fs.mkdirSync(path.dirname(HISTORY_PATH), { recursive: true });
   fs.writeFileSync(HISTORY_PATH, JSON.stringify(history));
 }
+
+function loadPaperState(): PaperState {
+  try {
+    if (fs.existsSync(PAPER_STATE_PATH)) {
+      return JSON.parse(fs.readFileSync(PAPER_STATE_PATH, 'utf8'));
+    }
+  } catch (error) {
+    console.error('Failed to load paper trade state:', error);
+  }
+  return { openPositions: [], closedPositions: [], sellSignalLog: [] };
+}
+
+function savePaperState(state: PaperState) {
+  fs.mkdirSync(path.dirname(PAPER_STATE_PATH), { recursive: true });
+  fs.writeFileSync(PAPER_STATE_PATH, JSON.stringify(state));
+}
+
 
 function changeOverWindow(points: PricePoint[], windowMs: number): number | null {
   if (points.length < 2) {
@@ -87,6 +135,7 @@ async function main() {
 
   const lunoApi = new LunoAPI(keyId, keySecret);
   const history = loadHistory();
+  const paperState = loadPaperState();
   const tickers = await lunoApi.getTickers();
   const now = Date.now();
 
@@ -106,30 +155,82 @@ async function main() {
 
   const messages: string[] = [];
 
-  // --- XRP sell rule ---
+  // --- Manage open paper positions: close on stop-loss / take-profit ---
+  const stillOpen: PaperPosition[] = [];
+  for (const position of paperState.openPositions) {
+    const ticker = tickers.find((t) => t.pair === position.pair);
+    const currentPrice = ticker?.currentPrice ?? 0;
+
+    if (currentPrice <= 0) {
+      stillOpen.push(position);
+      continue;
+    }
+
+    let closeReason: ClosedPaperPosition['closeReason'] | null = null;
+    if (currentPrice >= position.takeProfitPrice) {
+      closeReason = 'TAKE_PROFIT';
+    } else if (currentPrice <= position.stopLossPrice) {
+      closeReason = 'STOP_LOSS';
+    }
+
+    if (closeReason) {
+      const pnlMyr = (currentPrice - position.entryPrice) * position.quantity;
+      const pnlPercent = ((currentPrice - position.entryPrice) / position.entryPrice) * 100;
+      paperState.closedPositions.push({
+        ...position,
+        closePrice: currentPrice,
+        closedAt: now,
+        closeReason,
+        pnlMyr,
+        pnlPercent,
+      });
+      messages.push(
+        `<b>PAPER TRADE CLOSED (${closeReason})</b>\n${position.pair}: entry RM${position.entryPrice.toFixed(4)} -> close RM${currentPrice.toFixed(4)}\nSimulated P/L: RM${pnlMyr.toFixed(2)} (${pnlPercent >= 0 ? '+' : ''}${pnlPercent.toFixed(2)}%)\nThis was a simulation only, no real money involved.`
+      );
+    } else {
+      stillOpen.push(position);
+    }
+  }
+  paperState.openPositions = stillOpen;
+
+  // --- XRP sell rule (real holding, suggestion only) ---
   const xrpChange = changeOverWindow(history['XRPMYR'] || [], 60 * 60 * 1000);
   if (xrpChange !== null && xrpChange >= XRP_SELL_THRESHOLD_PERCENT) {
+    const xrpTicker = tickers.find((t) => t.pair === 'XRPMYR');
+    paperState.sellSignalLog.push({
+      timestamp: now,
+      price: xrpTicker?.currentPrice ?? 0,
+      changeLastHourPercent: xrpChange,
+    });
+
     try {
       const accountInfo = await lunoApi.getAccountInfo();
       const xrpBalance = (accountInfo.balance || []).find((b: { asset: string }) => b.asset === 'XRP');
       const holding = xrpBalance ? parseFloat(xrpBalance.balance) : 0;
       const suggestedSell = holding * XRP_SELL_PORTION;
       messages.push(
-        `<b>XRP SELL SIGNAL</b>\nXRP is up ${xrpChange.toFixed(2)}% in the last hour.\nSuggested: sell ${suggestedSell.toFixed(4)} XRP (50% of your ${holding.toFixed(4)} XRP).\nConfirm manually in Luno before acting.`
+        `<b>XRP SELL SIGNAL (logged, not executed)</b>\nXRP is up ${xrpChange.toFixed(2)}% in the last hour.\nSuggested: sell ${suggestedSell.toFixed(4)} XRP (50% of your ${holding.toFixed(4)} XRP).\nThis is a suggestion only; nothing was sold.`
       );
     } catch (error) {
       console.error('Failed to fetch balance for sell suggestion:', error);
     }
   }
 
-  // --- RM219 test trade rule ---
+  // --- RM219 test trade rule: open a paper position instead of real money ---
+  const alreadyOpenPairs = new Set(paperState.openPositions.map((p) => p.pair));
   const buyCandidates = TRACKED_MYR_PAIRS
     .map((pair) => {
       const change = changeOverWindow(history[pair] || [], 60 * 60 * 1000);
       const ticker = tickers.find((t) => t.pair === pair);
       return { pair, change, price: ticker?.currentPrice ?? 0 };
     })
-    .filter((c) => c.change !== null && c.change <= BUY_DIP_THRESHOLD_PERCENT && c.price > 0)
+    .filter(
+      (c) =>
+        c.change !== null &&
+        c.change <= BUY_DIP_THRESHOLD_PERCENT &&
+        c.price > 0 &&
+        !alreadyOpenPairs.has(c.pair)
+    )
     .sort((a, b) => (a.change ?? 0) - (b.change ?? 0));
 
   if (buyCandidates.length > 0) {
@@ -137,12 +238,24 @@ async function main() {
     const qty = TEST_CAPITAL_MYR / best.price;
     const stopLossPrice = best.price * (1 + STOP_LOSS_PERCENT / 100);
     const takeProfitPrice = best.price * (1 + TAKE_PROFIT_PERCENT / 100);
+
+    paperState.openPositions.push({
+      id: `${best.pair}-${now}`,
+      pair: best.pair,
+      entryPrice: best.price,
+      quantity: qty,
+      stopLossPrice,
+      takeProfitPrice,
+      openedAt: now,
+    });
+
     messages.push(
-      `<b>RM${TEST_CAPITAL_MYR} TEST TRADE SUGGESTION</b>\nBest candidate: ${best.pair} (${(best.change ?? 0).toFixed(2)}% in last hour)\nBuy ~${qty.toFixed(4)} ${best.pair.replace('MYR', '')} at RM${best.price.toFixed(4)}\nStop-loss: RM${stopLossPrice.toFixed(4)} | Take-profit: RM${takeProfitPrice.toFixed(4)}\nConfirm manually in Luno before acting.`
+      `<b>PAPER TRADE OPENED (simulation, RM${TEST_CAPITAL_MYR})</b>\nBest candidate: ${best.pair} (${(best.change ?? 0).toFixed(2)}% in last hour)\nSimulated buy: ~${qty.toFixed(4)} ${best.pair.replace('MYR', '')} at RM${best.price.toFixed(4)}\nStop-loss: RM${stopLossPrice.toFixed(4)} | Take-profit: RM${takeProfitPrice.toFixed(4)}\nNo real money was spent.`
     );
   }
 
   saveHistory(history);
+  savePaperState(paperState);
 
   if (messages.length > 0) {
     await sendTelegramMessage(telegramToken, telegramChatId, messages.join('\n\n'));
